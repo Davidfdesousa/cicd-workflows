@@ -1,0 +1,25 @@
+name: CI
+
+# CONSUMER repository. Keep your own jobs (lint, tests, build…) and add the
+# `design-tokens` job below; mark it as a required status check on `develop`.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # verify:
+  #   name: Lint · Test · Build
+  #   ...your project's jobs...
+
+  design-tokens:
+    uses: Davidfdesousa/cicd-workflows/.github/workflows/tokens-validate.yml@v1
+    with:
+      platform: android # web | android | ios | custom

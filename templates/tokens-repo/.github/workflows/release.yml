@@ -1,0 +1,67 @@
+name: Release
+
+# TOKENS repository. semantic-release builds the tokens with the version being
+# published, attaches one zip per platform to the GitHub Release and, for stable
+# releases on `main`, notifies the consumers listed in the TOKENS_CONSUMERS variable.
+
+on:
+  push:
+    branches: [main, rc]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  HUSKY: 0
+
+jobs:
+  release:
+    name: Verify and release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # tag, release commit, GitHub Release
+      issues: write # comment on issues fixed by the release
+      pull-requests: write # comment on PRs included in the release
+    outputs:
+      version: ${{ steps.semantic.outputs.version }}
+      channel: ${{ steps.semantic.outputs.channel }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # semantic-release needs the full history and tags
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+      - run: npm test
+
+      - name: Release
+        id: semantic
+        env:
+          # If `main` has a ruleset that blocks direct pushes, create RELEASE_TOKEN
+          # (GitHub App or PAT) allowed to bypass it.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        run: npx semantic-release
+
+  # Only stable releases reach the consumers automatically. Prereleases from `rc`
+  # can be pulled on demand from each consumer's "Sync design tokens" workflow.
+  distribute:
+    name: Distribute
+    needs: release
+    if: needs.release.outputs.version != '' && github.ref_name == 'main'
+    uses: Davidfdesousa/cicd-workflows/.github/workflows/tokens-distribute.yml@v1
+    with:
+      version: ${{ needs.release.outputs.version }}
+      consumers: ${{ vars.TOKENS_CONSUMERS }}
+    secrets:
+      DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}

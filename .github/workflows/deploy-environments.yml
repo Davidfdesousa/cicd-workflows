@@ -1,0 +1,132 @@
+name: Deploy · Environments (reusable)
+
+# Branch-based promotion for a CONSUMER repository:
+#
+#   develop     → dev   on every merge (including the automatic tokens PR)
+#   release/**  → hom   when a release branch is created or updated
+#   main        → prod  when the release is promoted
+#
+# Each environment is a GitHub Environment (dev, hom, prod) in the caller
+# repository, so its secrets, variables and protection rules (e.g. required
+# reviewers on prod) apply to this job.
+#
+# Steps: optional Node setup → `verify-command` (gates + build) → bundle the
+# `package-paths` → upload as an artifact → `deploy-command` (or a simulated
+# deploy when empty). `deploy-command` gets ENVIRONMENT, BUNDLE_DIR and, from the
+# environment, the DEPLOY_TARGET variable and the DEPLOY_TOKEN secret.
+
+on:
+  workflow_call:
+    inputs:
+      setup-node:
+        description: Install Node from `node-version-file` before the commands.
+        type: boolean
+        default: true
+      node-version-file:
+        type: string
+        default: .nvmrc
+      verify-command:
+        description: Gates and build, run before packaging.
+        type: string
+        default: npm ci && npm run lint && npm run typecheck && npm test && npm run build
+      package-paths:
+        description: Space-separated files/folders copied into the bundle (missing ones are skipped).
+        type: string
+        default: dist design-tokens
+      deploy-command:
+        description: Real deploy command. Empty = simulated deploy (summary only).
+        type: string
+        default: ''
+      dev-branch:
+        type: string
+        default: develop
+      hom-branch-prefix:
+        type: string
+        default: release/
+      prod-branch:
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: >-
+      Deploy · ${{ github.ref_name == inputs.prod-branch && 'prod'
+      || startsWith(github.ref_name, inputs.hom-branch-prefix) && 'hom'
+      || github.ref_name == inputs.dev-branch && 'dev' || 'none' }}
+    # Branches that are not mapped to an environment are skipped.
+    if: >-
+      github.ref_name == inputs.prod-branch
+      || startsWith(github.ref_name, inputs.hom-branch-prefix)
+      || github.ref_name == inputs.dev-branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: >-
+        ${{ github.ref_name == inputs.prod-branch && 'prod'
+        || startsWith(github.ref_name, inputs.hom-branch-prefix) && 'hom'
+        || github.ref_name == inputs.dev-branch && 'dev' || 'none' }}
+    concurrency:
+      group: deploy-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      HUSKY: 0
+      ENVIRONMENT: >-
+        ${{ github.ref_name == inputs.prod-branch && 'prod'
+        || startsWith(github.ref_name, inputs.hom-branch-prefix) && 'hom'
+        || github.ref_name == inputs.dev-branch && 'dev' || 'none' }}
+      VERIFY_COMMAND: ${{ inputs.verify-command }}
+      PACKAGE_PATHS: ${{ inputs.package-paths }}
+      DEPLOY_COMMAND: ${{ inputs.deploy-command }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        if: inputs.setup-node
+        with:
+          node-version-file: ${{ inputs.node-version-file }}
+          cache: npm
+
+      - name: Verify and build
+        run: bash -c "$VERIFY_COMMAND"
+
+      - name: Package
+        run: |
+          BUNDLE_DIR="$RUNNER_TEMP/bundle"
+          mkdir -p "$BUNDLE_DIR"
+          for path in $PACKAGE_PATHS; do
+            if [ -e "$path" ]; then cp -r "$path" "$BUNDLE_DIR/"; else echo "Skipping missing $path"; fi
+          done
+          echo "BUNDLE_DIR=$BUNDLE_DIR" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ env.ENVIRONMENT }}-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle
+          retention-days: 14
+
+      - name: Deploy
+        env:
+          # Caller's variable/secret, resolved per environment (dev/hom/prod)
+          # when the caller passes `secrets: inherit`.
+          DEPLOY_TARGET: ${{ vars.DEPLOY_TARGET }}
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: |
+          if [ -n "$DEPLOY_COMMAND" ]; then
+            bash -c "$DEPLOY_COMMAND"
+            mode="real"
+          else
+            echo "deploy-command is empty: simulated deploy."
+            mode="simulado"
+          fi
+          tokens=$(grep -rhoE 'Design tokens v[^ ]+' design-tokens 2>/dev/null | head -1 || true)
+          {
+            echo "### Deploy em \`$ENVIRONMENT\` ($mode)"
+            echo "- Branch: \`$GITHUB_REF_NAME\` · commit \`${GITHUB_SHA::7}\`"
+            echo "- ${tokens:-Design tokens: nenhum}"
+            echo "- Artefato: \`bundle-$ENVIRONMENT-$GITHUB_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"

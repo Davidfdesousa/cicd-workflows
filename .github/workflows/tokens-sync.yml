@@ -1,0 +1,135 @@
+name: Tokens · Sync (reusable)
+
+# Called by each CONSUMER repository (CDN, Android, iOS…):
+#
+#   1. downloads the platform zip attached to the tokens repository's GitHub Release;
+#   2. replaces the consumer's tokens folder with its contents;
+#   3. pushes a single rolling branch and opens (or updates) the PR to `develop`.
+#
+# The head branch is owned by the automation: every new version force-pushes it,
+# so a consumer never has more than one open tokens PR.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version to install, without the `v` prefix.
+        type: string
+        required: true
+      source-repository:
+        description: Tokens repository (`owner/repo`) whose release holds the asset.
+        type: string
+        required: true
+      asset:
+        description: Release asset to install, e.g. tokens-android.zip.
+        type: string
+        required: true
+      target-dir:
+        description: Folder in the consumer that receives the asset contents.
+        type: string
+        default: design-tokens
+      base-branch:
+        type: string
+        default: develop
+      head-branch:
+        type: string
+        default: feat/design-tokens
+      commit-type:
+        description: Conventional Commit prefix of the commit and PR title (`feat(tokens)` releases a minor).
+        type: string
+        default: feat(tokens)
+    secrets:
+      SYNC_TOKEN:
+        description: >-
+          Fine-grained PAT with Contents and Pull requests read & write on the consumer.
+          Optional, but PRs opened with the default GITHUB_TOKEN do not trigger the consumer's CI.
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Sync v${{ inputs.version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: tokens-sync-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      VERSION: ${{ inputs.version }}
+      ASSET: ${{ inputs.asset }}
+      TARGET_DIR: ${{ inputs.target-dir }}
+      BASE_BRANCH: ${{ inputs.base-branch }}
+      HEAD_BRANCH: ${{ inputs.head-branch }}
+      COMMIT_TYPE: ${{ inputs.commit-type }}
+      SOURCE_REPOSITORY: ${{ inputs.source-repository }}
+    steps:
+      - name: Validate input
+        env:
+          HAS_SYNC_TOKEN: ${{ secrets.SYNC_TOKEN != '' }}
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid version: $VERSION"; exit 1
+          fi
+          if [ "$HAS_SYNC_TOKEN" != "true" ]; then
+            echo "::warning::SYNC_TOKEN not set: the PR will be opened with GITHUB_TOKEN and CI will not run on it automatically."
+          fi
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.base-branch }}
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Download release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "v$VERSION" --repo "$SOURCE_REPOSITORY" --pattern "$ASSET" --dir "$RUNNER_TEMP/tokens"
+          rm -rf "$TARGET_DIR"
+          mkdir -p "$TARGET_DIR"
+          unzip -q "$RUNNER_TEMP/tokens/$ASSET" -d "$TARGET_DIR"
+          echo "Installed:" && find "$TARGET_DIR" -type f
+
+      - name: Commit to ${{ inputs.head-branch }}
+        id: commit
+        run: |
+          git add -A -- "$TARGET_DIR"
+          if git diff --cached --quiet; then
+            echo "Tokens in $BASE_BRANCH already match v$VERSION. Nothing to do."
+            echo "- Nada a fazer: \`$BASE_BRANCH\` já está na v$VERSION" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$HEAD_BRANCH"
+          git commit -m "$COMMIT_TYPE: atualiza design tokens para v$VERSION" \
+            -m "Origem: https://github.com/$SOURCE_REPOSITORY/releases/tag/v$VERSION"
+          git push --force origin "$HEAD_BRANCH"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the pull request
+        if: steps.commit.outputs.changed
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+        run: |
+          title="$COMMIT_TYPE: atualiza design tokens para v$VERSION"
+          body=$(cat <<EOF
+          Atualização automática dos design tokens.
+
+          - **Versão:** [v$VERSION](https://github.com/$SOURCE_REPOSITORY/releases/tag/v$VERSION)
+          - **Pacote:** \`$ASSET\` → \`$TARGET_DIR/\`
+          - **Disparado por:** $GITHUB_EVENT_NAME · [execução]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
+
+          Esta branch é mantida pela automação: uma nova versão substitui este conteúdo.
+          Não faça commits manuais aqui.
+          EOF
+          )
+          pr=$(gh pr list --head "$HEAD_BRANCH" --base "$BASE_BRANCH" --state open --json url --jq '.[0].url')
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --title "$title" --body "$body"
+          else
+            pr=$(gh pr create --head "$HEAD_BRANCH" --base "$BASE_BRANCH" --title "$title" --body "$body")
+          fi
+          echo "- PR: $pr" >> "$GITHUB_STEP_SUMMARY"

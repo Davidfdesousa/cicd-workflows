@@ -1,0 +1,84 @@
+name: Tokens · Distribute (reusable)
+
+# Called by the TOKENS repository after a release. Sends a `repository_dispatch`
+# event to every consumer so each one pulls its own asset from the GitHub Release
+# and opens the PR to its `develop` branch (see tokens-sync.yml).
+#
+# The dispatch needs a token with Contents: read & write on every consumer, which
+# the default GITHUB_TOKEN never has, hence DISPATCH_TOKEN.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Published version, without the `v` prefix (e.g. 1.2.0).
+        type: string
+        required: true
+      consumers:
+        description: >-
+          JSON array of consumer repositories. `repo` uses the caller's owner,
+          `owner/repo` targets another owner. Example: '["app-android","app-ios"]'.
+        type: string
+        required: true
+      target:
+        description: '`all` or a single entry of `consumers` (useful for a re-send or a rollback).'
+        type: string
+        default: all
+      event-type:
+        description: repository_dispatch event type the consumers listen to.
+        type: string
+        default: design-tokens-released
+    secrets:
+      DISPATCH_TOKEN:
+        description: Fine-grained PAT with Contents read & write on every consumer.
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    name: Notify ${{ matrix.consumer }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        consumer: ${{ fromJSON(inputs.consumers) }}
+    env:
+      VERSION: ${{ inputs.version }}
+      TARGET: ${{ inputs.target }}
+      CONSUMER: ${{ matrix.consumer }}
+      EVENT_TYPE: ${{ inputs.event-type }}
+    steps:
+      - name: Check target
+        id: target
+        run: |
+          if [ "$TARGET" = "all" ] || [ -z "$TARGET" ] || [ "$TARGET" = "$CONSUMER" ]; then
+            echo "selected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping $CONSUMER (target: $TARGET)"
+          fi
+
+      - name: Check that the release exists
+        if: steps.target.outputs.selected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid version: $VERSION"; exit 1
+          fi
+          gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName
+
+      - name: Send repository_dispatch
+        if: steps.target.outputs.selected
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          repo="$CONSUMER"
+          [[ "$repo" == */* ]] || repo="$GITHUB_REPOSITORY_OWNER/$repo"
+          gh api "repos/$repo/dispatches" \
+            -f "event_type=$EVENT_TYPE" \
+            -f "client_payload[version]=$VERSION" \
+            -f "client_payload[source]=$GITHUB_REPOSITORY"
+          echo "- \`$repo\` ← v$VERSION" >> "$GITHUB_STEP_SUMMARY"
