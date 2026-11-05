@@ -22,7 +22,7 @@ on:
         type: string
         default: design-tokens
       command:
-        description: Validation command for `platform: custom` (runs in the repository root).
+        description: 'Validation command for `platform: custom` (runs in the repository root).'
         type: string
         default: ''
 
