@@ -1,0 +1,34 @@
+name: Sync design tokens
+
+# CONSUMER repository. Receives `design-tokens-released` from the tokens
+# repository and opens/updates the PR `feat/design-tokens` → `develop`.
+# Also runs manually: pass a version to install a prerelease (rc) or roll back.
+#
+# Adjust TOKENS_ASSET for the platform: tokens-web.zip | tokens-android.zip | tokens-ios.zip
+#
+# repository_dispatch only triggers workflows on the DEFAULT branch: this file
+# must be on `main`.
+
+on:
+  repository_dispatch:
+    types: [design-tokens-released]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versão publicada no repositório de tokens (ex.: 1.2.0 ou 2.0.0-rc.1)'
+        type: string
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    uses: Davidfdesousa/cicd-workflows/.github/workflows/tokens-sync.yml@v1
+    with:
+      version: ${{ github.event.client_payload.version || inputs.version }}
+      source-repository: ${{ github.event.client_payload.source || vars.TOKENS_SOURCE_REPOSITORY }}
+      asset: tokens-android.zip
+    secrets:
+      SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}

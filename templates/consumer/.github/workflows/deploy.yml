@@ -1,0 +1,35 @@
+name: Deploy
+
+# CONSUMER repository. Promotion by branch:
+#   develop → dev · release/** → hom · main → prod
+# Requires the GitHub Environments dev, hom and prod (see README).
+
+on:
+  push:
+    branches: [develop, 'release/**', main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  design-tokens:
+    uses: Davidfdesousa/cicd-workflows/.github/workflows/tokens-validate.yml@v1
+    with:
+      platform: android # web | android | ios | custom
+
+  deploy:
+    needs: design-tokens
+    uses: Davidfdesousa/cicd-workflows/.github/workflows/deploy-environments.yml@v1
+    with:
+      # Gates + build of this project. Examples:
+      #   Node:    npm ci && npm run lint && npm test && npm run build
+      #   Android: ./gradlew lint test assembleRelease   (setup-node: false)
+      verify-command: npm ci && npm run lint && npm run typecheck && npm test && npm run build
+      package-paths: dist design-tokens
+      # Empty = simulated deploy. The command receives ENVIRONMENT, BUNDLE_DIR and,
+      # from each environment, the variable DEPLOY_TARGET and the secret DEPLOY_TOKEN.
+      # Example (Firebase Hosting, one project per environment):
+      #   npx firebase-tools deploy --only hosting --project "$DEPLOY_TARGET" --token "$DEPLOY_TOKEN"
+      deploy-command: ''
+    secrets: inherit

@@ -1,0 +1,108 @@
+name: Tokens · Validate (reusable)
+
+# Quality gate for the design tokens a consumer received. Use it as a job in the
+# consumer's CI (every PR, including the automatic tokens PR) and before deploys.
+#
+# Built-in checks per platform:
+#   web     → tokens.json (version + hex colors) and tokens.css (one var per token)
+#   android → values/colors.xml (<resources>, unique snake_case names, #RRGGBB[AA])
+#   ios     → DesignTokens.swift (public enum DesignTokens, `swiftc -parse` on macOS)
+#   custom  → runs `command` from the consumer's checkout
+#
+# Before the first sync the folder does not exist yet, so the job passes.
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: web | android | ios | custom
+        type: string
+        required: true
+      target-dir:
+        type: string
+        default: design-tokens
+      command:
+        description: 'Validation command for `platform: custom` (runs in the repository root).'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate design tokens (${{ inputs.platform }})
+    runs-on: ${{ inputs.platform == 'ios' && 'macos-latest' || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    env:
+      DIR: ${{ inputs.target-dir }}
+      PLATFORM: ${{ inputs.platform }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Check folder
+        id: folder
+        run: |
+          if [ -d "$DIR" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$DIR does not exist yet (no sync so far). Nothing to validate."
+          fi
+
+      - name: Validate web tokens
+        if: steps.folder.outputs.exists && inputs.platform == 'web'
+        run: |
+          for f in tokens.json tokens.css; do
+            [ -f "$DIR/$f" ] || { echo "::error::Expected $DIR/$f"; exit 1; }
+          done
+          node - "$DIR" <<'EOF'
+          const fs = require('node:fs');
+          const dir = process.argv[2];
+          const { version, tokens } = JSON.parse(fs.readFileSync(`${dir}/tokens.json`, 'utf8'));
+          const css = fs.readFileSync(`${dir}/tokens.css`, 'utf8');
+          const names = Object.keys(tokens ?? {});
+          if (!version || names.length === 0) throw new Error('tokens.json has no version or no tokens');
+          for (const name of names) {
+            if (!/^#[0-9A-F]{6}([0-9A-F]{2})?$/i.test(tokens[name])) throw new Error(`Invalid color in ${name}`);
+            if (!css.includes(`--${name}:`)) throw new Error(`--${name} missing from tokens.css`);
+          }
+          console.log(`OK: v${version}, ${names.length} tokens (JSON and CSS consistent)`);
+          EOF
+
+      - name: Validate Android tokens
+        if: steps.folder.outputs.exists && inputs.platform == 'android'
+        run: |
+          FILE="$DIR/values/colors.xml"
+          [ -f "$FILE" ] || { echo "::error::Expected $FILE"; exit 1; }
+          python3 - "$FILE" <<'EOF'
+          import re, sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          assert root.tag == 'resources', 'root must be <resources>'
+          colors = root.findall('color')
+          assert colors, 'no <color> found'
+          names = [c.get('name') for c in colors]
+          assert len(names) == len(set(names)), 'duplicated names'
+          for c in colors:
+              assert re.fullmatch(r'[a-z][a-z0-9_]*', c.get('name') or ''), f"invalid name: {c.get('name')}"
+              assert re.fullmatch(r'#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})', (c.text or '').strip()), f"invalid color: {c.get('name')}"
+          print(f'OK: {len(colors)} valid colors in colors.xml')
+          EOF
+
+      - name: Validate iOS tokens
+        if: steps.folder.outputs.exists && inputs.platform == 'ios'
+        run: |
+          FILE="$DIR/DesignTokens.swift"
+          [ -f "$FILE" ] || { echo "::error::Expected $FILE"; exit 1; }
+          grep -q 'public enum DesignTokens' "$FILE" || { echo "::error::enum DesignTokens missing"; exit 1; }
+          swiftc -parse "$FILE"
+          echo "OK: $(grep -c 'public static let' "$FILE") tokens, valid Swift syntax"
+
+      - name: Validate (custom)
+        if: steps.folder.outputs.exists && inputs.platform == 'custom'
+        env:
+          COMMAND: ${{ inputs.command }}
+        run: |
+          [ -n "$COMMAND" ] || { echo "::error::platform: custom requires the command input"; exit 1; }
+          bash -c "$COMMAND"

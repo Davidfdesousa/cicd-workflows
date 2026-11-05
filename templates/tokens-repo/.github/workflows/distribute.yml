@@ -1,0 +1,29 @@
+name: Distribute design tokens
+
+# TOKENS repository. Manual re-send of a version that is already published:
+# a consumer was offline, a new consumer needs the current version, or a rollback.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versão já publicada (ex.: 1.2.0 ou 2.0.0-rc.1)'
+        type: string
+        required: true
+      target:
+        description: '`all` ou o nome de um consumidor da variável TOKENS_CONSUMERS'
+        type: string
+        default: all
+
+permissions:
+  contents: read
+
+jobs:
+  distribute:
+    uses: Davidfdesousa/cicd-workflows/.github/workflows/tokens-distribute.yml@v1
+    with:
+      version: ${{ inputs.version }}
+      target: ${{ inputs.target }}
+      consumers: ${{ vars.TOKENS_CONSUMERS }}
+    secrets:
+      DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
